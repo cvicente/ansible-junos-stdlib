@@ -230,14 +230,6 @@ def junos_install_config(module, dev):
         results['msg'] = msg
         logging.error(msg)
 
-    except RpcError as err:
-        results['failed'] = True
-        import pprint
-        err_data = pprint.pformat(err)
-        msg = 'Configuration check failed: ' + err_data
-        results['msg'] = msg
-        logging.error(msg)
-
     except CommitError:
         results['failed'] = True
         msg = "Unable to commit configuration"
