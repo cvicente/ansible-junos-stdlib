@@ -213,12 +213,12 @@ def junos_install_config(module, dev):
                     msg += "Unexpected error:", sys.exc_info()[0]
                     module.fail_json(msg=msg)
 
-                if ( in_check_mode ):
-                    logging.info("doing a commit-check, please be patient")
-                    cu.commit_check()
-                else:
-                    logging.info("committing change, please be patient")
-                    cu.commit()
+            if ( in_check_mode ):
+                logging.info("doing a commit-check, please be patient")
+                cu.commit_check()
+            else:
+                logging.info("committing change, please be patient")
+                cu.commit()
 
         logging.info("unlocking")
         cu.unlock()
