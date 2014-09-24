@@ -185,6 +185,7 @@ def junos_install_config(module, dev):
             e = err.rsp[0].find('rpc-error')
             err_list = []
             err_list.append("severity:'{0}'".format(e.findtext('.//error-severity')))
+            err_list.append("path:'{0}'".format(e.findtext('.//error-path')))
             err_list.append("msg:'{0}'".format(e.findtext('.//error-message')))
             bad_elems = e.findall('.//bad-element')
             err_list.append("bad element:'{0}'".format(bad_elems[0].text))
