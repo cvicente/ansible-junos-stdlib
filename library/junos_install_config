@@ -51,8 +51,8 @@ description:
       NETCONF include ASCII text, Junos XML elements, and Junos OS B(set) commands.
       Configurations performed through the console must only use ASCII text formatting.
 requirements:
-    - junos-eznc >= 1.0.0
-    - junos-netconify >= 0.1.1, when using the I(console) option
+    - junos-eznc >= 1.1.0
+    - junos-netconify >= 1.0.0, when using the I(console) option
 options:
     host:
         description:
@@ -116,6 +116,16 @@ options:
               Refer to the B(netconify) utility for details.
         required: false
         default: None
+    comment:
+        description:
+            - Provide a comment to the commit of the configuration
+        required: false
+        default: None
+    port:
+        description:
+            - TCP port number to use when connecting to the device
+        required: false
+        default: 830
 '''
 
 EXAMPLES = '''
@@ -132,17 +142,28 @@ EXAMPLES = '''
     console="--telnet={{TERMSERV}},{{TERMSERV_PORT}}"
     file=default_new_switch.conf
     overwrite=yes
+
+# load merge a change to the Junos OS configuration using NETCONF and supplying a commit log message
+- junos_install_config:
+    host={{ inventory_hostname }}
+    file=banner.conf
+    comment="configured by ansible"
 '''
 
 import logging
 from os.path import isfile
-
 import os
+import re
+
 try:
     from jnpr.junos import Device
     from jnpr.junos.exception import *
     from jnpr.junos.utils.config import Config
-    HAS_PYEZ = True
+    from jnpr.junos.version import VERSION
+    if not float(re.match('\d+.\d+', VERSION).group()) >= 1.1:
+        HAS_PYEZ = False
+    else:
+        HAS_PYEZ = True
 except ImportError:
     HAS_PYEZ = False
 
@@ -181,6 +202,11 @@ def junos_install_config(module, dev):
         except ValueError as err:
             logging.error("unable to load config:{0}".format(err.message))
             raise err
+        except ConfigLoadError as err:
+            logging.error("unable to load config:{0},{1},{2}".format(err.errs['severity'],
+                                                                     err.errs['bad_element'],
+                                                                     err.errs['message']))
+            raise err
         except Exception as err:
             e = err.rsp[0].find('rpc-error')
             err_list = []
@@ -198,8 +224,7 @@ def junos_install_config(module, dev):
         diff = cu.diff()
 
         if diff is not None:
-            results['changed'] = True
-            diffs_file= args['diffs_file']
+            diffs_file = args['diffs_file']
             if diffs_file is not None:
                 try:
                     f = open(diffs_file, 'w')
@@ -214,12 +239,16 @@ def junos_install_config(module, dev):
                     msg += "Unexpected error:", sys.exc_info()[0]
                     module.fail_json(msg=msg)
 
-            if ( in_check_mode ):
+            if (in_check_mode):
                 logging.info("doing a commit-check, please be patient")
                 cu.commit_check()
             else:
                 logging.info("committing change, please be patient")
-                cu.commit()
+                if args['comment'] is not None:
+                    cu.commit(comment=args['comment'])
+                else:
+                    cu.commit()
+                results['changed'] = True
 
         logging.info("unlocking")
         cu.unlock()
@@ -231,9 +260,11 @@ def junos_install_config(module, dev):
         results['msg'] = msg
         logging.error(msg)
 
-    except CommitError:
+    except CommitError as err:
         results['failed'] = True
-        msg = "Unable to commit configuration"
+        msg = "Unable to commit configuration:{0},{1},{2}".format(err.errs['severity'],
+                                                                  err.errs['bad_element'],
+                                                                  err.errs['message'])
         results['msg'] = msg
         logging.error(msg)
 
@@ -255,10 +286,10 @@ def _load_via_netconf(module):
                             format='%(asctime)s:%(name)s:%(message)s')
         logging.getLogger().name = 'CONFIG:' + args['host']
 
-    logging.info("connecting to host: {0}@{1}".format(args['user'], args['host']))
+    logging.info("connecting to host: {0}@{1}:{2}".format(args['user'], args['host'], args['port']))
 
     try:
-        dev = Device(args['host'], user=args['user'], password=args['passwd'])
+        dev = Device(args['host'], user=args['user'], password=args['passwd'], port=args['port'])
         dev.open()
     except Exception as err:
         msg = 'unable to connect to {0}: {1}'.format(args['host'], str(err))
@@ -276,8 +307,11 @@ def _load_via_netconf(module):
 def _load_via_console(module):
     try:
         from netconify.cmdo import netconifyCmdo
+        from netconify.constants import version
+        if not float(re.match('\d+.\d+', version).group()) >= 1.0:
+            module.fail_json(msg='junos-netconify >= 1.0.x is required for this module')
     except ImportError:
-        module.fail_json(msg='junos-netconify is required for this module')
+        module.fail_json(msg='junos-netconify >= 1.0.x is required for this module')
 
     m_args = module.params
 
@@ -306,16 +340,19 @@ def _load_via_console(module):
                             format='%(asctime)s:%(name)s:%(message)s')
         logging.getLogger().name = 'NETCONIFY:' + m_args['host']
 
-        def log_notify(event, message):
+        def log_notify(self, event, message):
             logging.info("%s:%s" % (event, message))
         use_notifier = log_notify
     else:
-        def silent_notify(event, message):
+        def silent_notify(self, event, message):
             pass
         use_notifier = silent_notify
 
-    nc = netconifyCmdo(notify=use_notifier)
-    c_results = nc.run(c_args)
+    try:
+        nc = netconifyCmdo(notify=use_notifier)
+        c_results = nc.run(c_args)
+    except Exception as err:
+        module.fail_json(msg=str(err))
     m_results = dict(changed=c_results['changed'])
     if c_results['failed'] is True:
         module.fail_json(msg=c_results['errmsg'])
@@ -339,11 +376,14 @@ def main():
             logfile=dict(required=False, default=None),
             diffs_file=dict(required=False, default=None),
             savedir=dict(required=False),
-            timeout=dict(required=False, default=0)),
+            timeout=dict(required=False, default=0),
+            comment=dict(required=False, default=None),
+            port=dict(required=False, default=830)
+        ),
         supports_check_mode=True)
 
     if not HAS_PYEZ:
-        module.fail_json(msg='junos-eznc is required for this module')
+        module.fail_json(msg='junos-eznc >= 1.1.x is required for this module')
 
     args = module.params
 

@@ -52,8 +52,8 @@ description:
       configuration. After the reboot, you must log in through the console
       as root in order to access the device.
 requirements:
-    - junos-eznc >= 1.0.0
-    - junos-netconify >= 0.1.1, when using the I(console) option
+    - junos-eznc >= 1.1.0
+    - junos-netconify >= 1.0.0, when using the I(console) option
 options:
     host:
         description:
@@ -88,6 +88,11 @@ options:
               for debugging purposes
         required: false
         default: None
+    port:
+        description:
+            - TCP port number to use when connecting to the device
+        required: false
+        default: 830
 notes:
     - You B(MUST) either use the I(host) option or the I(console) option to designate
       how the device is accessed.
@@ -101,6 +106,7 @@ EXAMPLES = '''
 
 import os
 import logging
+import re
 
 
 def main():
@@ -111,7 +117,9 @@ def main():
             console=dict(required=False, default=None),     # param to netconify
             user=dict(required=False, default=os.getenv('USER')),
             passwd=dict(required=False, default=None),
-            logfile=dict(required=False, default=None)),
+            logfile=dict(required=False, default=None),
+            port=dict(required=False, default=830)
+        ),
         supports_check_mode=False)
 
     args = module.params
@@ -128,14 +136,14 @@ def main():
     logfile = module.params['logfile']
     if logfile is not None:
         logging.basicConfig(filename=logfile, level=logging.INFO,
-            format='%(asctime)s:%(name)s:%(message)s')
+                            format='%(asctime)s:%(name)s:%(message)s')
         logging.getLogger().name = 'NETCONIFY:' + module.params['host']
 
-        def log_notify(event, message):
+        def log_notify(self, event, message):
             logging.info("%s:%s" % (event, message))
         use_notifier = log_notify
     else:
-        def silent_notify(event, message):
+        def silent_notify(self, event, message):
             pass
         use_notifier = silent_notify
 
@@ -143,28 +151,34 @@ def main():
         # via NETCONF
         try:
             from jnpr.junos import Device
+            from jnpr.junos.version import VERSION
+            if not float(re.match('\d+.\d+', VERSION).group()) >= 1.1:
+                module.fail_json(msg='junos-eznc >= 1.1.x is required for this module')
         except ImportError:
-            module.fail_json(msg='junos-eznc is required for this module')
+            module.fail_json(msg='junos-eznc >= 1.1.x is required for this module')
 
-        dev = Device(args['host'], user=args['user'], password=args['passwd'])
+        dev = Device(args['host'], user=args['user'], password=args['passwd'], port=args['port'])
         try:
-            use_notifier('LOGIN', 'host={0}'.format(args['host']))
+            use_notifier(None, 'LOGIN', 'host={0}'.format(args['host']))
             dev.open()
-            use_notifier('LOGIN', 'OK')
+            use_notifier(None, 'LOGIN', 'OK')
         except Exception as err:
             msg = 'unable to connect to {0}: {1}'.format(args['host'], str(err))
             module.fail_json(msg=msg)
             # --- UNREACHABLE ---
 
-        use_notifier('ZEROIZE', 'invoking command')
+        use_notifier(None, 'ZEROIZE', 'invoking command')
         dev.cli('request system zeroize')
         results['changed'] = True
         # no close, we're done after this point.
     else:
         try:
             from netconify.cmdo import netconifyCmdo
+            from netconify.constants import version
+            if not float(re.match('\d+.\d+', version).group()) >= 1.0:
+                module.fail_json(msg='junos-netconify >= 1.0.x is required for this module')
         except ImportError:
-            module.fail_json(msg='junos-netconify is required for this module')
+            module.fail_json(msg='junos-netconify >= 1.0.x is required for this module')
         nc_args = []
         nc_args.append(args['console'])
         nc_args.append('--zeroize')
@@ -173,12 +187,15 @@ def main():
         if args['passwd'] is not None:
             nc_args.append('--passwd=' + args['passwd'])
 
-        nc = netconifyCmdo(notify=use_notifier)
-        nc.run(nc_args)
+        try:
+            nc = netconifyCmdo(notify=use_notifier)
+            nc.run(nc_args)
+        except Exception as err:
+            module.fail_json(msg=str(err))
         results['changed'] = True
 
     # indicate done in the logfile and return results
-    use_notifier('DONE', 'OK')
+    use_notifier(None, 'DONE', 'OK')
     module.exit_json(**results)
 
 from ansible.module_utils.basic import *
